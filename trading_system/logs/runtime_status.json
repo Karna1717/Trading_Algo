@@ -1,0 +1,9 @@
+{
+  "mode": "backtest",
+  "symbol": "^NSEI",
+  "latest_signal": "NONE",
+  "open_trade": null,
+  "total_profit": -103.7,
+  "last_trade_count": 20,
+  "rejected_signal_count": 6
+}

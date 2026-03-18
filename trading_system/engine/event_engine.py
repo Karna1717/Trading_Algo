@@ -8,7 +8,6 @@ from typing import Literal, Optional
 import pandas as pd
 
 from trading_system.config import STOP_LOSS_POINTS, TAKE_PROFIT_POINTS
-from trading_system.engine.position_manager import PositionManager, PositionManagerConfig
 from trading_system.logging_utils import get_logger
 from trading_system.strategy.ripple_strategy import RippleStrategy
 
@@ -24,7 +23,9 @@ class PendingEntry:
 
     trade_type: TradeType
     signal_time: pd.Timestamp
-    debug: dict[str, bool]
+    stop_reference_price: float
+    target_price: float
+    debug: dict[str, bool | float]
 
 
 @dataclass(slots=True)
@@ -45,7 +46,7 @@ class Position:
     tp_price: float
     sl_price: float
     signal_time: pd.Timestamp
-    debug: dict[str, bool]
+    debug: dict[str, bool | float]
 
 
 @dataclass(slots=True)
@@ -64,6 +65,8 @@ class TradeRecord:
     profit_points: float
     exit_reason: Optional[str]
     ema_cross: bool
+    volume_condition: bool
+    risk_condition: bool
     strong_body: bool
     wick_condition: bool
     session_condition: bool
@@ -75,20 +78,15 @@ class EventEngine:
     def __init__(
         self,
         strategy: Optional[RippleStrategy] = None,
-        position_manager: Optional[PositionManager] = None,
         take_profit_points: float = TAKE_PROFIT_POINTS,
         stop_loss_points: float = STOP_LOSS_POINTS,
     ) -> None:
         self.strategy = strategy or RippleStrategy()
-        self.position_manager_config = (
-            position_manager.config if position_manager is not None else PositionManagerConfig()
-        )
         self.take_profit_points = take_profit_points
         self.stop_loss_points = stop_loss_points
 
     def run(self, prepared_df: pd.DataFrame) -> tuple[pd.DataFrame, list[TradeRecord]]:
         """Process candles sequentially and return annotated candles plus trade records."""
-        position_manager = PositionManager(self.position_manager_config)
         df = prepared_df.copy()
         df["position_state"] = "FLAT"
         df["entry_marker"] = pd.NA
@@ -110,21 +108,10 @@ class EventEngine:
                     trade_type=pending_entry.trade_type,
                     entry_time=timestamp,
                     entry_price=float(candle["open"]),
-                    tp_price=self._calculate_take_profit(
-                        pending_entry.trade_type,
-                        float(candle["open"]),
-                    ),
-                    sl_price=self._calculate_stop_loss(
-                        pending_entry.trade_type,
-                        float(candle["open"]),
-                    ),
+                    tp_price=pending_entry.target_price,
+                    sl_price=pending_entry.stop_reference_price,
                     signal_time=pending_entry.signal_time,
                     debug=pending_entry.debug,
-                )
-                position_manager.register_trade_open(
-                    trade_type=pending_entry.trade_type,
-                    entry_price=float(candle["open"]),
-                    entry_time=timestamp,
                 )
                 df.at[timestamp, "position_state"] = pending_entry.trade_type
                 df.at[timestamp, "entry_marker"] = float(candle["open"])
@@ -143,7 +130,6 @@ class EventEngine:
                         exit_price,
                         pending_exit.exit_reason,
                     )
-                    position_manager.register_trade_close(record.profit_points, timestamp)
                     trades.append(record)
                     df.at[timestamp, "exit_marker"] = exit_price
                     df.at[timestamp, "event_note"] = (
@@ -166,7 +152,6 @@ class EventEngine:
                     else:
                         last_close = float(candle["close"])
                         record = self._close_position(position, timestamp, last_close, "END_OF_DATA")
-                        position_manager.register_trade_close(record.profit_points, timestamp)
                         trades.append(
                             record
                         )
@@ -182,34 +167,27 @@ class EventEngine:
                         logger.warning("Duplicate signal ignored at %s", signal_payload.signal_candle_time)
                     else:
                         seen_signal_times.add(signal_payload.signal_candle_time)
-                        approval = position_manager.can_open_trade(
-                            signal_time=signal_payload.signal_candle_time
+                        stop_reference_price = self._previous_candle_stop_reference(
+                            df=df,
+                            signal_index=idx,
+                            trade_type=signal_payload.signal,
                         )
-                        if approval.approved:
-                            pending_entry = PendingEntry(
+                        pending_entry = PendingEntry(
+                            trade_type=signal_payload.signal,
+                            signal_time=signal_payload.signal_candle_time,
+                            stop_reference_price=stop_reference_price,
+                            target_price=self._signal_candle_target_price(
+                                signal_close=float(signal_payload.debug["signal_close"]),
                                 trade_type=signal_payload.signal,
-                                signal_time=signal_payload.signal_candle_time,
-                                debug=signal_payload.debug,
-                            )
-                            df.at[timestamp, "event_note"] = "Signal approved"
-                        else:
-                            trades.append(
-                                self._build_rejected_trade_record(
-                                    signal_time=signal_payload.signal_candle_time,
-                                    signal_type=signal_payload.signal,
-                                    rejection_reason=approval.rejection_reason or "rejected",
-                                    debug=signal_payload.debug,
-                                )
-                            )
-                            df.at[timestamp, "event_note"] = (
-                                f"Signal rejected: {approval.rejection_reason}"
-                            )
+                            ),
+                            debug=signal_payload.debug,
+                        )
+                        df.at[timestamp, "event_note"] = "Signal approved"
 
         if position is not None:
             last_timestamp = df.index[-1]
             last_close = float(df.iloc[-1]["close"])
             record = self._close_position(position, last_timestamp, last_close, "END_OF_DATA")
-            position_manager.register_trade_close(record.profit_points, last_timestamp)
             trades.append(record)
             df.at[last_timestamp, "exit_marker"] = last_close
             df.at[last_timestamp, "event_note"] = "end_of_data"
@@ -233,6 +211,8 @@ class EventEngine:
                 return "SL"
             if target_hit:
                 return "TP"
+            if idx > 0 and float(candle["close"]) < float(df.iloc[idx - 1]["low"]):
+                return "STRUCTURE_EXIT"
         else:
             target_hit = float(candle["low"]) <= position.tp_price
             stop_hit = float(candle["high"]) >= position.sl_price
@@ -242,6 +222,11 @@ class EventEngine:
                 return "SL"
             if target_hit:
                 return "TP"
+            if idx > 0 and float(candle["close"]) > float(df.iloc[idx - 1]["high"]):
+                return "STRUCTURE_EXIT"
+
+        if df.index[idx].strftime("%H:%M") == "15:21":
+            return "TIME_EXIT"
 
         return None
 
@@ -270,6 +255,8 @@ class EventEngine:
             profit_points=round(profit, 2),
             exit_reason=exit_reason,
             ema_cross=position.debug["ema_cross"],
+            volume_condition=bool(position.debug["volume_condition"]),
+            risk_condition=bool(position.debug["risk_condition"]),
             strong_body=position.debug["strong_body"],
             wick_condition=position.debug["wick_condition"],
             session_condition=position.debug["session_condition"],
@@ -280,10 +267,19 @@ class EventEngine:
             return entry_price + self.take_profit_points
         return entry_price - self.take_profit_points
 
-    def _calculate_stop_loss(self, trade_type: TradeType, entry_price: float) -> float:
+    def _previous_candle_stop_reference(
+        self,
+        df: pd.DataFrame,
+        signal_index: int,
+        trade_type: TradeType,
+    ) -> float:
+        previous_candle = df.iloc[signal_index - 1]
         if trade_type == "LONG":
-            return entry_price - self.stop_loss_points
-        return entry_price + self.stop_loss_points
+            return float(previous_candle["low"])
+        return float(previous_candle["high"])
+
+    def _signal_candle_target_price(self, signal_close: float, trade_type: TradeType) -> float:
+        return self._calculate_take_profit(trade_type, signal_close)
 
     def _build_rejected_trade_record(
         self,
@@ -305,6 +301,8 @@ class EventEngine:
             profit_points=0.0,
             exit_reason=None,
             ema_cross=debug["ema_cross"],
+            volume_condition=bool(debug.get("volume_condition", False)),
+            risk_condition=bool(debug.get("risk_condition", False)),
             strong_body=debug["strong_body"],
             wick_condition=debug["wick_condition"],
             session_condition=debug["session_condition"],
@@ -328,6 +326,8 @@ def trades_to_dataframe(trades: list[TradeRecord]) -> pd.DataFrame:
                 "profit_points",
                 "exit_reason",
                 "ema_cross",
+                "volume_condition",
+                "risk_condition",
                 "strong_body",
                 "wick_condition",
                 "session_condition",

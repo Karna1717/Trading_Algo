@@ -21,6 +21,8 @@ TRADE_LOG_COLUMNS = [
     "profit_points",
     "exit_reason",
     "ema_cross",
+    "volume_condition",
+    "risk_condition",
     "strong_body",
     "wick_condition",
     "session_condition",
@@ -58,4 +60,3 @@ def read_trade_log(log_path: Path = TRADE_LOG_PATH) -> pd.DataFrame:
         return pd.DataFrame(columns=TRADE_LOG_COLUMNS)
     raw_df = pd.read_csv(log_path)
     return normalize_trade_log_schema(raw_df)
-

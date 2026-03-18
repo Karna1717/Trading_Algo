@@ -10,8 +10,8 @@ TRADE_LOG_PATH = LOGS_DIR / "trade_log.csv"
 APP_LOG_PATH = LOGS_DIR / "system.log"
 STATUS_PATH = LOGS_DIR / "runtime_status.json"
 
-DEFAULT_INTERVAL = "3m"
-DEFAULT_PERIOD = "30d"
+DEFAULT_INTERVAL = "5m"
+DEFAULT_PERIOD = "60d"
 MARKET_TIMEZONE = "Asia/Kolkata"
 
 SESSION_START = "09:18"

@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+trading_system/logs/*.csv
+trading_system/logs/*.json
+trading_system/logs/*.log
+!trading_system/logs/.gitkeep

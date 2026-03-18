@@ -12,7 +12,6 @@ import pandas as pd
 from trading_system.analytics.performance import PerformanceSummary, compute_performance_summary
 from trading_system.config import DEFAULT_INTERVAL, TRADE_LOG_PATH
 from trading_system.data.yfinance_loader import MarketDataConfig, YFinanceLoader
-from trading_system.engine.position_manager import PositionManager, PositionManagerConfig
 from trading_system.engine.event_engine import EventEngine, trades_to_dataframe
 from trading_system.logging_utils import get_logger
 from trading_system.runtime_status import write_runtime_status
@@ -39,7 +38,6 @@ class PaperTrader:
         interval: str = DEFAULT_INTERVAL,
         polling_seconds: int = 60,
         lookback: str = "5d",
-        position_manager_config: Optional[PositionManagerConfig] = None,
         log_path: Path = TRADE_LOG_PATH,
     ) -> None:
         self.symbol = symbol
@@ -47,11 +45,7 @@ class PaperTrader:
         self.lookback = lookback
         self.loader = YFinanceLoader(MarketDataConfig(symbol=symbol, interval=interval))
         self.strategy = RippleStrategy()
-        self.position_manager_config = position_manager_config or PositionManagerConfig()
-        self.event_engine = EventEngine(
-            strategy=self.strategy,
-            position_manager=PositionManager(self.position_manager_config),
-        )
+        self.event_engine = EventEngine(strategy=self.strategy)
         self.log_path = log_path
         self.state = PaperTraderState()
 
